@@ -1,7 +1,15 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { calculateUnderwriting, type UnderwritingInputs } from "@/lib/underwriting";
+import {
+  CAPEX_RESERVE_PER_UNIT_PER_YEAR,
+  calculateCapRateStressTest,
+  calculateRedFlags,
+  calculateUnderwriting,
+  calculateVerdict,
+  type UnderwritingInputs,
+  type Verdict,
+} from "@/lib/underwriting";
 import { InfoTooltip } from "./info-tooltip";
 
 const DEFAULT_INPUTS: UnderwritingInputs = {
@@ -14,6 +22,7 @@ const DEFAULT_INPUTS: UnderwritingInputs = {
   loanAmount: 3_500_000,
   annualInterestRatePct: 6.5,
   amortizationYears: 30,
+  capexReservesEnabled: false,
 };
 
 const currencyFormatter = new Intl.NumberFormat("en-US", {
@@ -34,8 +43,10 @@ function fmtMultiple(value: number, digits = 2): string {
   return Number.isFinite(value) ? `${value.toFixed(digits)}x` : "—";
 }
 
+type NumericInputKey = Exclude<keyof UnderwritingInputs, "capexReservesEnabled">;
+
 type FieldConfig = {
-  key: keyof UnderwritingInputs;
+  key: NumericInputKey;
   label: string;
   tooltip: string;
   prefix?: string;
@@ -146,6 +157,76 @@ function InputField({
   );
 }
 
+function ToggleField({
+  label,
+  tooltip,
+  checked,
+  onChange,
+}: {
+  label: string;
+  tooltip: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex items-center gap-3 sm:col-span-2">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-1 focus:ring-slate-500 dark:border-slate-700 dark:bg-slate-900"
+      />
+      <span className="flex items-center text-sm font-medium text-slate-700 dark:text-slate-300">
+        {label}
+        <InfoTooltip text={tooltip} />
+      </span>
+    </label>
+  );
+}
+
+function OptionalNumberField({
+  label,
+  tooltip,
+  suffix,
+  placeholder,
+  step,
+  value,
+  onChange,
+}: {
+  label: string;
+  tooltip: string;
+  suffix?: string;
+  placeholder?: string;
+  step?: number;
+  value: number | undefined;
+  onChange: (value: number | undefined) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="flex items-center text-sm font-medium text-slate-700 dark:text-slate-300">
+        {label}
+        <InfoTooltip text={tooltip} />
+      </span>
+      <div className="mt-1.5 flex items-center rounded-md border border-slate-300 bg-white transition-colors focus-within:border-slate-500 focus-within:ring-1 focus-within:ring-slate-500 dark:border-slate-700 dark:bg-slate-900">
+        <input
+          type="number"
+          inputMode="decimal"
+          value={value ?? ""}
+          placeholder={placeholder}
+          step={step ?? 0.1}
+          min={0}
+          onChange={(event) => {
+            const raw = event.target.valueAsNumber;
+            onChange(Number.isNaN(raw) ? undefined : raw);
+          }}
+          className="w-full bg-transparent px-3 py-2 text-sm text-slate-900 outline-none dark:text-slate-100 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+        />
+        {suffix && <span className="pr-3 text-sm text-slate-400">{suffix}</span>}
+      </div>
+    </label>
+  );
+}
+
 type Tone = "default" | "good" | "warn" | "bad";
 
 const TONE_CLASSES: Record<Tone, string> = {
@@ -202,12 +283,51 @@ function ResultsCard({
   );
 }
 
+const VERDICT_BANNER_CLASSES: Record<Verdict, string> = {
+  PURSUE:
+    "border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950",
+  PASS: "border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950",
+  "NEEDS MORE INFO":
+    "border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950",
+};
+
+const VERDICT_TEXT_CLASSES: Record<Verdict, string> = {
+  PURSUE: "text-emerald-700 dark:text-emerald-400",
+  PASS: "text-red-700 dark:text-red-400",
+  "NEEDS MORE INFO": "text-amber-700 dark:text-amber-400",
+};
+
+function VerdictBanner({ verdict, reasoning }: { verdict: Verdict; reasoning: string }) {
+  return (
+    <div
+      className={`mb-8 rounded-lg border px-5 py-4 ${VERDICT_BANNER_CLASSES[verdict]}`}
+    >
+      <span
+        className={`text-sm font-bold uppercase tracking-wide ${VERDICT_TEXT_CLASSES[verdict]}`}
+      >
+        {verdict}
+      </span>
+      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">{reasoning}</p>
+    </div>
+  );
+}
+
 export default function UnderwritingCalculator() {
   const [inputs, setInputs] = useState<UnderwritingInputs>(DEFAULT_INPUTS);
+  const [statedCapRatePct, setStatedCapRatePct] = useState<number | undefined>(undefined);
 
   const results = useMemo(() => calculateUnderwriting(inputs), [inputs]);
+  const verdict = useMemo(() => calculateVerdict(results), [results]);
+  const redFlags = useMemo(() => calculateRedFlags(inputs, results), [inputs, results]);
+  const stressTest = useMemo(
+    () =>
+      statedCapRatePct && statedCapRatePct > 0
+        ? calculateCapRateStressTest(inputs, statedCapRatePct)
+        : null,
+    [inputs, statedCapRatePct],
+  );
 
-  function updateField(key: keyof UnderwritingInputs, value: number) {
+  function updateField(key: NumericInputKey, value: number) {
     setInputs((prev) => ({ ...prev, [key]: value }));
   }
 
@@ -237,6 +357,8 @@ export default function UnderwritingCalculator() {
         </p>
       </header>
 
+      <VerdictBanner verdict={verdict.verdict} reasoning={verdict.reasoning} />
+
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
         <section className="rounded-lg border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
           <h2 className="mb-5 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-500">
@@ -251,6 +373,23 @@ export default function UnderwritingCalculator() {
                 onChange={(value) => updateField(field.key, value)}
               />
             ))}
+            <OptionalNumberField
+              label="Stated cap rate (from listing)"
+              tooltip="Optional. The cap rate advertised in the listing. When filled in, shows the NOI it implies and the monthly rent per unit required to hit that NOI at a range of expense ratios."
+              suffix="%"
+              placeholder="e.g. 5.5"
+              step={0.05}
+              value={statedCapRatePct}
+              onChange={setStatedCapRatePct}
+            />
+            <ToggleField
+              label={`Include capex reserves ($${CAPEX_RESERVE_PER_UNIT_PER_YEAR}/unit/yr)`}
+              tooltip="Deducts a capital expenditure reserve of $275 per unit per year from NOI before cap rate, DSCR, and cash-on-cash are calculated."
+              checked={inputs.capexReservesEnabled}
+              onChange={(checked) =>
+                setInputs((prev) => ({ ...prev, capexReservesEnabled: checked }))
+              }
+            />
           </div>
         </section>
 
@@ -271,9 +410,16 @@ export default function UnderwritingCalculator() {
               tooltip="Annual operating expenses, calculated as the operating expense ratio applied to effective gross income."
               value={fmtCurrency(results.operatingExpenses)}
             />
+            {inputs.capexReservesEnabled && (
+              <MetricRow
+                label="Capex reserves"
+                tooltip={`Capital expenditure reserve of $${CAPEX_RESERVE_PER_UNIT_PER_YEAR} per unit per year, deducted from NOI.`}
+                value={fmtCurrency(results.capexReserves)}
+              />
+            )}
             <MetricRow
               label="Net operating income"
-              tooltip="Effective gross income less operating expenses. Income before debt service; the core driver of property value."
+              tooltip="Effective gross income less operating expenses (and capex reserves, if enabled). Income before debt service; the core driver of property value."
               value={fmtCurrency(results.netOperatingIncome)}
               emphasis
             />
@@ -320,13 +466,68 @@ export default function UnderwritingCalculator() {
               emphasis
             />
           </ResultsCard>
+
+          {stressTest && (
+            <ResultsCard title="Cap Rate Stress Test">
+              <MetricRow
+                label="Implied NOI (from stated cap rate)"
+                tooltip="Purchase price × stated cap rate. The NOI the listing's cap rate assumes."
+                value={fmtCurrency(stressTest.impliedNoi)}
+                emphasis
+              />
+              <div className="py-2.5">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-500">
+                      <th className="pb-2 text-left font-semibold">Expense ratio</th>
+                      <th className="pb-2 text-right font-semibold">
+                        Required rent / unit / mo
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {stressTest.rows.map((row) => (
+                      <tr key={row.expenseRatioPct}>
+                        <td className="py-2 text-slate-600 dark:text-slate-400">
+                          {row.expenseRatioPct}%
+                        </td>
+                        <td className="py-2 text-right font-medium tabular-nums text-slate-900 dark:text-slate-100">
+                          {fmtCurrency(row.requiredRentPerUnitPerMonth)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </ResultsCard>
+          )}
         </div>
       </div>
 
+      {redFlags.length > 0 && (
+        <div className="mt-8 rounded-lg border border-amber-200 bg-amber-50 p-5 dark:border-amber-900 dark:bg-amber-950">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-amber-800 dark:text-amber-400">
+            Red Flags
+          </h3>
+          <ul className="mt-3 space-y-2">
+            {redFlags.map((flag) => (
+              <li
+                key={flag.id}
+                className="flex gap-2 text-sm text-amber-900 dark:text-amber-300"
+              >
+                <span aria-hidden>⚠</span>
+                <span>{flag.message}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <p className="mt-10 text-xs leading-relaxed text-slate-400 dark:text-slate-600">
-        Year-one static analysis only — excludes rent growth, exit assumptions, capex
-        reserves, closing costs, and loan fees. Vacancy loss is applied to rental income
-        only; other income is assumed collected regardless of vacancy.
+        Year-one static analysis only — excludes rent growth, exit assumptions, closing
+        costs, and loan fees. Capex reserves are only reflected in NOI when the toggle
+        above is enabled. Vacancy loss is applied to rental income only; other income is
+        assumed collected regardless of vacancy.
       </p>
     </div>
   );
